@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  db:
+    build: .
+    environment:
+      POSTGRES_USER: bao
+      POSTGRES_PASSWORD: bao
+      POSTGRES_DB: bao
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ../imdb:/imdb
+    command: ["postgres", "-c", "shared_preload_libraries=pg_hint_plan", "-c", "pg_hint_plan.enable_hint=on", "-c", "pg_hint_plan.debug_print=on", "-c", "pg_hint_plan.message_level=info"]
+
+volumes:
+  pgdata:

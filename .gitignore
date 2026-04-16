@@ -1,0 +1,11 @@
+# Python Virtual Environment
+.venv/
+__pycache__/
+
+# Bao Model Output
+models/
+benchmark_results.csv
+
+# Massive Internal Datasets
+job_queries/
+data/
