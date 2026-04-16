@@ -1,6 +1,6 @@
 # Bao: Bandit Learned Optimizer for PostgreSQL 
 
-A faithful, functional re-creation of the **Bao Query Optimizer** ([SIGMOD 2021](https://rmarcus.info/bao.html)), implemented in complete end-to-end Python using **PyTorch**, **PostgreSQL**, and **pg_hint_plan**.
+A faithful, functional re-creation of the **Bao Query Optimizer** , implemented in complete end-to-end Python using **PyTorch**, **PostgreSQL**, and **pg_hint_plan**.
 
 ## Motivation
 Bao functions as a contextual multi-armed bandit. Instead of predicting database costs to form execution paths manually, it selects a set of robust optimization hints using Thompson Sampling, captures the actual execution topological structure through PostgreSQL `EXPLAIN FORMAT JSON`, and feeds the execution timings to a Tree Convolutional Neural Network (TreeCNN) for real-time workload learning!
