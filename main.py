@@ -67,26 +67,52 @@ def tree_collate_fn(batch):
 
 # --- Dataset Loader Facility ---
 
-def load_job_queries(limit):
-    """Load the official Join Order Benchmark queries for native training."""
-    queries = []
+def load_job_queries(limit, split_ratio=1.0, seed=42, mode="train"):
+    """
+    Load JOB queries and split them by template to ensure generalization.
+    Templates are identified by the numeric prefix of the filename (e.g., 1a.sql -> Template 1).
+    """
+    import re
+    from collections import defaultdict
+    
     sql_files = glob.glob('job_queries/*.sql')
     sql_files = [f for f in sql_files if 'fkindexes' not in f and 'schema' not in f]
     sql_files.sort()
     
-    if limit:
-        sql_files = sql_files[:limit]
+    # Group queries by template
+    template_groups = defaultdict(list)
+    for f in sql_files:
+        name = os.path.basename(f)
+        template_id = re.match(r'(\d+)', name).group(1)
+        template_groups[template_id].append(f)
         
-    for sql_file in sql_files:
+    unique_templates = sorted(list(template_groups.keys()), key=int)
+    random.seed(seed)
+    random.shuffle(unique_templates)
+    
+    split_idx = int(len(unique_templates) * split_ratio)
+    
+    if mode == "train":
+        selected_templates = unique_templates[:split_idx]
+    else:
+        selected_templates = unique_templates[split_idx:]
+        
+    selected_files = []
+    for t_id in selected_templates:
+        selected_files.extend(template_groups[t_id])
+    
+    selected_files.sort()
+    if limit:
+        selected_files = selected_files[:limit]
+        
+    queries = []
+    for sql_file in selected_files:
         query_name = os.path.basename(sql_file).replace('.sql', '')
         with open(sql_file, 'r') as f:
-            sql = f.read()
-            # Replace semicolon since pg_hint_plan injections wrap around the whole query
-            sql = sql.replace(';', '')
-            queries.append({
-                "name": query_name.upper(),
-                "sql": sql
-            })
+            sql = f.read().replace(';', '')
+            queries.append({"name": query_name.upper(), "sql": sql})
+            
+    print(f"[*] Mode: {mode.upper()} | Templates: {len(selected_templates)} | Queries: {len(queries)}")
     return queries
 
 # --- Main Training & Simulation Loop ---
@@ -94,10 +120,12 @@ def load_job_queries(limit):
 def main():
     parser = argparse.ArgumentParser(description="Bao Learned Optimizer")
     parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
-    parser.add_argument("--limit", type=int, default=3, help="Number of queries to train on per epoch")
+    parser.add_argument("--limit", type=int, default=None, help="Limit total queries in the split")
+    parser.add_argument("--split", type=float, default=0.8, help="Train/Test split ratio (templates)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting templates")
     args = parser.parse_args()
     
-    queries = load_job_queries(args.limit)
+    queries = load_job_queries(args.limit, split_ratio=args.split, seed=args.seed, mode="train")
     
     # Initialize Core Modules
     model = TreeCNN(in_channels=30, out_channels=128)  # 26 one-hot + 4 metrics = 30
@@ -124,7 +152,7 @@ def main():
                 # Formulate the EXPLAIN plans natively from Postgres for each arm
                 arm_plans = []
                 for hint_idx, hint_str in BAO_HINT_SETS.items():
-                    explain_query = f"EXPLAIN (FORMAT JSON) /*+ {hint_str} */ {q['sql']}"
+                    explain_query = f"/*+ {hint_str} */ EXPLAIN (FORMAT JSON) {q['sql']}"
                     try:
                         cur.execute(explain_query)
                         plan_json = cur.fetchone()[0][0]

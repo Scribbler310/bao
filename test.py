@@ -67,29 +67,60 @@ def check_and_seed_data(conn):
         else:
             print("[*] Database is already seeded.")
 
-def load_job_queries(limit):
-    """Load the official Join Order Benchmark queries."""
-    queries = []
+def load_job_queries(limit, split_ratio=0.2, seed=42, mode="test"):
+    """
+    Load JOB queries and split them by template. 
+    Mode 'test' returns the hold-out set, Mode 'train' returns the training set.
+    """
+    import re
+    import random
+    from collections import defaultdict
+    
     sql_files = glob.glob('job_queries/*.sql')
     sql_files = [f for f in sql_files if 'fkindexes' not in f and 'schema' not in f]
     sql_files.sort()
     
-    if limit:
-        sql_files = sql_files[:limit]
+    # Group queries by template (e.g. 1a.sql, 1b.sql -> template 1)
+    template_groups = defaultdict(list)
+    for f in sql_files:
+        name = os.path.basename(f)
+        template_id = re.match(r'(\d+)', name).group(1)
+        template_groups[template_id].append(f)
         
-    for sql_file in sql_files:
+    unique_templates = sorted(list(template_groups.keys()), key=int)
+    random.seed(seed)
+    random.shuffle(unique_templates)
+    
+    # The split ratio here is for the TRAINING set
+    # If split_ratio=0.8, then 80% is train, 20% is test.
+    # In test mode, we take the latter part.
+    train_split_ratio = 1.0 - split_ratio if mode == "test" else split_ratio
+    split_idx = int(len(unique_templates) * (1.0 - split_ratio))
+    
+    if mode == "test":
+        selected_templates = unique_templates[split_idx:]
+    else:
+        selected_templates = unique_templates[:split_idx]
+        
+    selected_files = []
+    for t_id in selected_templates:
+        selected_files.extend(template_groups[t_id])
+    
+    selected_files.sort()
+    if limit:
+        selected_files = selected_files[:limit]
+        
+    queries = []
+    for sql_file in selected_files:
         query_name = os.path.basename(sql_file).replace('.sql', '')
         with open(sql_file, 'r') as f:
-            sql = f.read()
-            # Replace semicolon since pg_hint_plan injections wrap around the whole query
-            sql = sql.replace(';', '')
-            queries.append({
-                "name": query_name.upper(),
-                "sql": sql
-            })
+            sql = f.read().replace(';', '')
+            queries.append({"name": query_name.upper(), "sql": sql})
+            
+    print(f"[*] Mode: {mode.upper()} | Templates: {len(selected_templates)} | Queries: {len(queries)}")
     return queries
 
-def evaluate_queries(limit):
+def evaluate_queries(limit, split_ratio, seed):
     print("[*] Connecting to PostgreSQL...")
     conn = psycopg2.connect(**DB_CONFIG)
     
@@ -106,7 +137,7 @@ def evaluate_queries(limit):
     else:
         print("[!] No trained weights found. Model will predict randomly.")
         
-    test_queries = load_job_queries(limit=limit)
+    test_queries = load_job_queries(limit=limit, split_ratio=split_ratio, seed=seed, mode="test")
     print(f"[*] Loaded {len(test_queries)} JOB Benchmarks for evaluation.")
     
     with conn.cursor() as cur:
@@ -123,7 +154,7 @@ def evaluate_queries(limit):
             
             # Step 1: Query PostgreSQL for EXPLAIN JSON for evaluating all hints
             for hint_idx, hint_str in BAO_HINT_SETS.items():
-                explain_query = f"EXPLAIN (FORMAT JSON) /*+ {hint_str} */ {q['sql']}"
+                explain_query = f"/*+ {hint_str} */ EXPLAIN (FORMAT JSON) {q['sql']}"
                 try:
                     cur.execute(explain_query)
                     plan_json = cur.fetchone()[0][0]
@@ -198,6 +229,8 @@ def evaluate_queries(limit):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate Bao on JOB")
-    parser.add_argument("--limit", type=int, default=3, help="Limit number of JOB queries tested")
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of JOB queries tested")
+    parser.add_argument("--split", type=float, default=0.2, help="Hold-out split ratio (templates, default 0.2)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting (must match main.py)")
     args = parser.parse_args()
-    evaluate_queries(args.limit)
+    evaluate_queries(args.limit, args.split, args.seed)

@@ -1,15 +1,43 @@
 import torch
 import numpy as np
 
-# Bao Predefined Hint Sets (Arms)
-BAO_HINT_SETS = {
-    0: "/*+ Set(enable_hashjoin on) Set(enable_mergejoin on) Set(enable_nestloop on) */", # Default PG
-    1: "/*+ Set(enable_hashjoin off) */",
-    2: "/*+ Set(enable_mergejoin off) */",
-    3: "/*+ Set(enable_nestloop off) */",
-    4: "/*+ Set(enable_indexscan off) Set(enable_bitmapscan off) */",
-    5: "/*+ Set(enable_seqscan off) */"
-}
+import itertools
+
+# List of PostgreSQL planner method flags to manipulate
+PLANNER_FLAGS = [
+    "enable_nestloop", "enable_mergejoin", "enable_hashjoin",
+    "enable_indexscan", "enable_indexonlyscan", "enable_bitmapscan", "enable_seqscan"
+]
+
+def generate_hint_sets():
+    """
+    Generate 48 systematically varied hint sets (arms) by disabling subsets
+    of join types and scan types, mimicking the Bao paper methodology.
+    """
+    hint_sets = {0: "Set(enable_hashjoin on) Set(enable_mergejoin on) Set(enable_nestloop on)"}
+    
+    # Generate all combinations of flags to disable
+    all_combos = []
+    # 1 flag off, 2 flags off, 3 flags off...
+    for r in range(1, 4):
+        for combo in itertools.combinations(PLANNER_FLAGS, r):
+            # Constraint: Don't disable all join types or all scan types
+            off_set = set(combo)
+            joins = {"enable_nestloop", "enable_mergejoin", "enable_hashjoin"}
+            scans = {"enable_indexscan", "enable_indexonlyscan", "enable_bitmapscan", "enable_seqscan"}
+            
+            if off_set.issuperset(joins) or off_set.issuperset(scans):
+                continue
+            all_combos.append(combo)
+            
+    # Select the first 47 combinations to get 48 total arms (including index 0)
+    for i, combo in enumerate(all_combos[:47]):
+        hint_str = " ".join([f"Set({flag} off)" for flag in combo])
+        hint_sets[i+1] = hint_str
+        
+    return hint_sets
+
+BAO_HINT_SETS = generate_hint_sets()
 
 class ThompsonSamplingBandit:
     def __init__(self, model, num_mc_samples=10):
