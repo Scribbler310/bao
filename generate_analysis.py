@@ -96,7 +96,7 @@ def generate_analysis():
     # Open bao_insights.md for appending
     with open("bao_insights.md", "w") as md_file:
         md_file.write("# Bao Query Optimizer: Strategic Insights\n\n")
-        md_file.write("| Query | Hint | Predicted (ms) | Actual (ms) | Summary |\n")
+        md_file.write("| Query | Hint | Postgres (ms) | Actual (ms) | Summary |\n")
         md_file.write("|---|---|---|---|---|\n")
 
         for idx, row in enumerate(rows):
@@ -156,7 +156,7 @@ def generate_analysis():
             row['AI_Summary'] = summary
             
             # Update Markdown
-            md_file.write(f"| {query_name} | `{hint[:30]}...` | {predicted_time:.2f} | {actual_time} | {summary} |\n")
+            md_file.write(f"| {query_name} | `{hint[:30]}...` | {postgres_time} | {actual_time} | {summary} |\n")
             md_file.flush()
 
     # 6. Write back to CSV
