@@ -11,7 +11,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
 from model import TreeCNN
-from featurizer import parse_plan_json, PlanNode
+from featurizer import parse_plan_json, PlanNode, PG_OPERATORS
 from bandit import (ThompsonSamplingBandit, BAO_HINT_SETS)
 
 DB_CONFIG = {
@@ -128,7 +128,8 @@ def main():
     queries = load_job_queries(args.limit, split_ratio=args.split, seed=args.seed, mode="train")
     
     # Initialize Core Modules
-    model = TreeCNN(in_channels=30, out_channels=128)  # 26 one-hot + 4 metrics = 30
+    in_channels = len(PG_OPERATORS) + 4
+    model = TreeCNN(in_channels=in_channels, out_channels=128)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     loss_fn = nn.MSELoss()
     

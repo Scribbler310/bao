@@ -6,7 +6,7 @@ import glob
 import argparse
 import csv
 from model import TreeCNN
-from featurizer import parse_plan_json
+from featurizer import parse_plan_json, PG_OPERATORS
 from bandit import BAO_HINT_SETS
 
 DB_CONFIG = {
@@ -129,7 +129,8 @@ def evaluate_queries(limit, split_ratio, seed):
     print("[*] Loading trained Bao Pytorch Model...")
     model_path = os.path.join("models", "bao_imdb.pt")
     
-    model = TreeCNN(in_channels=30, out_channels=128)
+    in_channels = len(PG_OPERATORS) + 4
+    model = TreeCNN(in_channels=in_channels, out_channels=128)
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path))
         model.eval()

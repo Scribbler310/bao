@@ -6,9 +6,13 @@ import numpy as np
 PG_OPERATORS = [
     'Aggregate', 'Gather', 'Gather Merge', 'Hash Join', 'Merge Join', 'Nested Loop',
     'Seq Scan', 'Index Scan', 'Index Only Scan', 'Bitmap Heap Scan', 'Bitmap Index Scan',
+    'Parallel Seq Scan', 'Parallel Index Scan', 'Parallel Index Only Scan', 'Parallel Bitmap Heap Scan',
     'Sort', 'Hash', 'Materialize', 'Limit', 'Subquery Scan', 'CTE Scan', 'Result',
     'Append', 'Merge Append', 'Recursive Union', 'WindowAgg', 'Group', 'LockRows',
-    'SetOp', 'Unique'
+    'SetOp', 'Unique', 'Foreign Scan', 'Custom Scan', 'Values Scan', 'Function Scan',
+    'Table Function Scan', 'WorkTable Scan', 'Named Tuplestore Scan', 'CTE Scan',
+    'Project Set', 'Incremental Sort', 'Memoize', 'Tid Scan', 'Tid Range Scan',
+    'Sample Scan'
 ]
 
 # Map operator to one-hot index
