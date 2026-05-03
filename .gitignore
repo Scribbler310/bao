@@ -12,3 +12,7 @@ paper_figures/
 job_queries/
 job_d/
 data/
+
+#PycharmIDE Files
+.idea
+.junie
