@@ -67,60 +67,33 @@ def check_and_seed_data(conn):
         else:
             print("[*] Database is already seeded.")
 
-def load_job_queries(limit, split_ratio=0.2, seed=42, mode="test"):
+
+def load_job_queries(limit):
     """
-    Load JOB queries and split them by template. 
-    Mode 'test' returns the hold-out set, Mode 'train' returns the training set.
+    Load JOB queries for testing directly from the `job_queries` folder.
     """
-    import re
-    import random
-    from collections import defaultdict
-    
+    import glob
+    import os
+
+    # Target the job_queries directory natively
     sql_files = glob.glob('job_queries/*.sql')
     sql_files = [f for f in sql_files if 'fkindexes' not in f and 'schema' not in f]
     sql_files.sort()
-    
-    # Group queries by template (e.g. 1a.sql, 1b.sql -> template 1)
-    template_groups = defaultdict(list)
-    for f in sql_files:
-        name = os.path.basename(f)
-        template_id = re.match(r'(\d+)', name).group(1)
-        template_groups[template_id].append(f)
-        
-    unique_templates = sorted(list(template_groups.keys()), key=int)
-    random.seed(seed)
-    random.shuffle(unique_templates)
-    
-    # The split ratio here is for the TRAINING set
-    # If split_ratio=0.8, then 80% is train, 20% is test.
-    # In test mode, we take the latter part.
-    train_split_ratio = 1.0 - split_ratio if mode == "test" else split_ratio
-    split_idx = int(len(unique_templates) * (1.0 - split_ratio))
-    
-    if mode == "test":
-        selected_templates = unique_templates[split_idx:]
-    else:
-        selected_templates = unique_templates[:split_idx]
-        
-    selected_files = []
-    for t_id in selected_templates:
-        selected_files.extend(template_groups[t_id])
-    
-    selected_files.sort()
+
     if limit:
-        selected_files = selected_files[:limit]
-        
+        sql_files = sql_files[:limit]
+
     queries = []
-    for sql_file in selected_files:
+    for sql_file in sql_files:
         query_name = os.path.basename(sql_file).replace('.sql', '')
         with open(sql_file, 'r') as f:
             sql = f.read().replace(';', '')
             queries.append({"name": query_name.upper(), "sql": sql})
-            
-    print(f"[*] Mode: {mode.upper()} | Templates: {len(selected_templates)} | Queries: {len(queries)}")
+
+    print(f"[*] Mode: TEST | Queries: {len(queries)} loaded directly from job_queries/")
     return queries
 
-def evaluate_queries(limit, split_ratio, seed):
+def evaluate_queries(limit):
     print("[*] Connecting to PostgreSQL...")
     conn = psycopg2.connect(**DB_CONFIG)
     
@@ -138,7 +111,7 @@ def evaluate_queries(limit, split_ratio, seed):
     else:
         print("[!] No trained weights found. Model will predict randomly.")
         
-    test_queries = load_job_queries(limit=limit, split_ratio=split_ratio, seed=seed, mode="test")
+    test_queries = load_job_queries(limit=limit)
     print(f"[*] Loaded {len(test_queries)} JOB Benchmarks for evaluation.")
     
     with conn.cursor() as cur:
@@ -231,7 +204,5 @@ def evaluate_queries(limit, split_ratio, seed):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate Bao on JOB")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of JOB queries tested")
-    parser.add_argument("--split", type=float, default=0.2, help="Hold-out split ratio (templates, default 0.2)")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting (must match main.py)")
     args = parser.parse_args()
-    evaluate_queries(args.limit, args.split, args.seed)
+    evaluate_queries(args.limit)

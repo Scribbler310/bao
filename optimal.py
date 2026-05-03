@@ -8,7 +8,7 @@ from bandit import BAO_HINT_SETS
 from test import load_job_queries, check_and_seed_data, DB_CONFIG
 
 
-def precompute_optimals(limit, split_ratio, seed, max_timeout_ms=20000):
+def precompute_optimals(limit, max_timeout_ms=20000):
     print("[*] Connecting to PostgreSQL...")
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -19,7 +19,7 @@ def precompute_optimals(limit, split_ratio, seed, max_timeout_ms=20000):
     check_and_seed_data(conn)
 
     # Load ONLY the test holdout set
-    test_queries = load_job_queries(limit=limit, split_ratio=split_ratio, seed=seed, mode="test")
+    test_queries = load_job_queries(limit=limit, mode="test")
     print(f"[*] Loaded {len(test_queries)} holdout queries for optimal baseline search.")
 
     os.makedirs("metrics", exist_ok=True)
@@ -93,8 +93,6 @@ def precompute_optimals(limit, split_ratio, seed, max_timeout_ms=20000):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Precompute Optimal Bao Hints")
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--split", type=float, default=0.2)
-    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    precompute_optimals(args.limit, args.split, args.seed)
+    precompute_optimals(args.limit)

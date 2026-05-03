@@ -5,7 +5,7 @@ import time
 import math
 import glob
 import csv
-from collections import Counter, defaultdict
+from collections import Counter
 
 import torch
 import psycopg2
@@ -15,7 +15,7 @@ from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 
 from model import TreeCNN
-from featurizer import parse_plan_json, PlanNode, PG_OPERATORS
+from featurizer import parse_plan_json, PG_OPERATORS
 from bandit import (ThompsonSamplingBandit, BAO_HINT_SETS)
 
 DB_CONFIG = {
@@ -28,20 +28,21 @@ DB_CONFIG = {
 
 STATEMENT_TIMEOUT_MS = 20000.0
 
+
 # --- Configuration & Setup ---
 
 class ExperienceReplayBuffer:
-    def __init__(self, capacity=10000):
+    def __init__(self, capacity=2000):  # Changed to 2000 to match paper
         self.capacity = capacity
         self.buffer = []
-        
+
     def add(self, query_id, hint_set_idx, plan_node, actual_time_ms):
         """
         Store an execution experience.
         """
         if len(self.buffer) >= self.capacity:
             self.buffer.pop(0)
-            
+
         self.buffer.append({
             'query_id': query_id,
             'hint_set_idx': hint_set_idx,
@@ -49,8 +50,14 @@ class ExperienceReplayBuffer:
             'actual_log_time': math.log(max(actual_time_ms, 1.0))
         })
 
-    def sample(self, batch_size):
-        return random.sample(self.buffer, min(batch_size, len(self.buffer)))
+    def sample_with_replacement(self):
+        """
+        Thompson Sampling requires bootstrapping.
+        We draw |E| samples with replacement from the buffer.
+        """
+        n_samples = len(self.buffer)
+        return [random.choice(self.buffer) for _ in range(n_samples)]
+
 
 class TrainingMetrics:
     def __init__(self):
@@ -75,22 +82,14 @@ class TrainingMetrics:
         return max(predicted_ms / actual_ms, actual_ms / predicted_ms)
 
     def add_query_result(
-        self,
-        epoch,
-        query_name,
-        query_id,
-        selected_hint,
-        predicted_log_time,
-        actual_time_ms,
-        postgres_time_ms,
-        timed_out,
-        valid_plan_count
+            self, cycle, query_name, query_id, selected_hint, predicted_log_time,
+            actual_time_ms, postgres_time_ms, timed_out, valid_plan_count
     ):
         predicted_time_ms = math.exp(float(predicted_log_time))
         q_error = self._q_error(predicted_time_ms, actual_time_ms)
 
         self.query_records.append({
-            "epoch": epoch,
+            "epoch": cycle,  # Used as cycle tracker now
             "query_name": query_name,
             "query_id": query_id,
             "selected_hint": selected_hint,
@@ -103,16 +102,15 @@ class TrainingMetrics:
             "valid_plan_count": valid_plan_count,
         })
 
-    def add_training_loss(self, epoch, loss):
+    def add_training_loss(self, cycle, loss):
         self.training_losses.append({
-            "epoch": epoch,
+            "epoch": cycle,
             "training_loss": loss,
         })
 
-    def summarize_epoch(self, epoch):
-        records = [r for r in self.query_records if r["epoch"] == epoch]
+    def summarize_cycle(self, cycle):
+        records = [r for r in self.query_records if r["epoch"] == cycle]
         if not records:
-            print(f"[*] Epoch {epoch} Metrics: no query records collected.")
             return
 
         latencies = [r["actual_time_ms"] for r in records]
@@ -131,7 +129,7 @@ class TrainingMetrics:
         max_q_error = max(q_errors)
 
         epoch_summary = {
-            "epoch": epoch,
+            "epoch": cycle,
             "query_count": len(records),
             "mean_latency_ms": mean_latency,
             "median_latency_ms": median_latency,
@@ -144,193 +142,40 @@ class TrainingMetrics:
         }
         self.epoch_records.append(epoch_summary)
 
-        print(f"[*] Epoch {epoch} Metrics")
-        print(f"    Queries Evaluated:     {len(records)}")
+        print(f"[*] Cycle {cycle} Metrics (Last 100 queries)")
         print(f"    Mean Latency:          {mean_latency:.2f} ms")
-        print(f"    Median Latency:        {median_latency:.2f} ms")
         print(f"    P95 Latency:           {p95_latency:.2f} ms")
-        print(f"    Max Latency:           {max_latency:.2f} ms")
         print(f"    Timeout Rate:          {timeout_rate:.2%}")
-        print(f"    Median Q-Error:        {median_q_error:.3f}")
-        print(f"    P95 Q-Error:           {p95_q_error:.3f}")
-        print(f"    Max Q-Error:           {max_q_error:.3f}")
         print(f"    Hint Distribution:     {dict(sorted(hint_counts.items()))}")
 
     def print_final_summary(self):
         if not self.query_records:
-            print("[*] Final Metrics: no query records collected.")
             return
 
         latencies = [r["actual_time_ms"] for r in self.query_records]
         q_errors = [r["q_error"] for r in self.query_records]
         timeout_count = sum(r["timed_out"] for r in self.query_records)
-        hint_counts = Counter(r["selected_hint"] for r in self.query_records)
 
         print("\n[*] Final Metrics Summary")
         print(f"    Total Query Executions: {len(self.query_records)}")
         print(f"    Mean Latency:           {sum(latencies) / len(latencies):.2f} ms")
-        print(f"    Median Latency:         {self._percentile(latencies, 50):.2f} ms")
         print(f"    P95 Latency:            {self._percentile(latencies, 95):.2f} ms")
-        print(f"    Max Latency:            {max(latencies):.2f} ms")
         print(f"    Timeout Rate:           {timeout_count / len(self.query_records):.2%}")
-        print(f"    Median Q-Error:         {self._percentile(q_errors, 50):.3f}")
         print(f"    P95 Q-Error:            {self._percentile(q_errors, 95):.3f}")
-        print(f"    Max Q-Error:            {max(q_errors):.3f}")
-        print(f"    Hint Distribution:      {dict(sorted(hint_counts.items()))}")
 
     def save_csvs(self, output_dir):
         os.makedirs(output_dir, exist_ok=True)
-
         query_metrics_path = os.path.join(output_dir, "query_metrics.csv")
         with open(query_metrics_path, "w", newline="") as f:
             fieldnames = [
-                "epoch",
-                "query_name",
-                "query_id",
-                "selected_hint",
-                "predicted_log_time",
-                "predicted_time_ms",
-                "actual_time_ms",
-                "postgres_time_ms",
-                "q_error",
-                "timed_out",
-                "valid_plan_count",
+                "epoch", "query_name", "query_id", "selected_hint", "predicted_log_time",
+                "predicted_time_ms", "actual_time_ms", "postgres_time_ms", "q_error",
+                "timed_out", "valid_plan_count",
             ]
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(self.query_records)
 
-        epoch_metrics_path = os.path.join(output_dir, "epoch_metrics.csv")
-        with open(epoch_metrics_path, "w", newline="") as f:
-            fieldnames = [
-                "epoch",
-                "query_count",
-                "mean_latency_ms",
-                "median_latency_ms",
-                "p95_latency_ms",
-                "max_latency_ms",
-                "timeout_rate",
-                "median_q_error",
-                "p95_q_error",
-                "max_q_error",
-            ]
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(self.epoch_records)
-
-        training_loss_path = os.path.join(output_dir, "training_loss.csv")
-        with open(training_loss_path, "w", newline="") as f:
-            fieldnames = ["epoch", "training_loss"]
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(self.training_losses)
-
-        print(f"[*] Metrics CSV files saved to {output_dir}")
-
-    def save_plots(self, output_dir):
-        if plt is None:
-            print("[!] matplotlib is not installed. Skipping plots.")
-            return
-
-        os.makedirs(output_dir, exist_ok=True)
-
-        if self.epoch_records:
-            epochs = [r["epoch"] for r in self.epoch_records]
-
-            plt.figure(figsize=(10, 6))
-            plt.plot(epochs, [r["mean_latency_ms"] for r in self.epoch_records], marker="o", label="Mean")
-            plt.plot(epochs, [r["median_latency_ms"] for r in self.epoch_records], marker="o", label="Median")
-            plt.plot(epochs, [r["p95_latency_ms"] for r in self.epoch_records], marker="o", label="P95")
-            plt.xlabel("Epoch")
-            plt.ylabel("Latency (ms)")
-            plt.title("Latency by Epoch")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, "latency_by_epoch.png"))
-            plt.close()
-
-            plt.figure(figsize=(10, 6))
-            plt.plot(epochs, [r["timeout_rate"] for r in self.epoch_records], marker="o")
-            plt.xlabel("Epoch")
-            plt.ylabel("Timeout Rate")
-            plt.title("Timeout Rate by Epoch")
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, "timeout_rate_by_epoch.png"))
-            plt.close()
-
-            plt.figure(figsize=(10, 6))
-            plt.plot(epochs, [r["median_q_error"] for r in self.epoch_records], marker="o", label="Median")
-            plt.plot(epochs, [r["p95_q_error"] for r in self.epoch_records], marker="o", label="P95")
-            plt.xlabel("Epoch")
-            plt.ylabel("Q-Error")
-            plt.title("Prediction Q-Error by Epoch")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, "q_error_by_epoch.png"))
-            plt.close()
-
-            plt.figure(figsize=(10, 6))
-            plt.plot(
-                [r["epoch"] for r in self.training_losses],
-                [r["training_loss"] for r in self.training_losses],
-                marker="o"
-            )
-            plt.xlabel("Epoch")
-            plt.ylabel("Training Loss")
-            plt.title("Training Loss by Epoch")
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, "training_loss_by_epoch.png"))
-            plt.close()
-
-        if self.query_records:
-            actual = [r["actual_time_ms"] for r in self.query_records]
-            predicted = [r["predicted_time_ms"] for r in self.query_records]
-
-            plt.figure(figsize=(8, 8))
-            plt.scatter(actual, predicted, alpha=0.7)
-            max_value = max(max(actual), max(predicted), 1.0)
-            plt.plot([1.0, max_value], [1.0, max_value], linestyle="--", color="black", label="Perfect Prediction")
-            plt.xscale("log")
-            plt.yscale("log")
-            plt.xlabel("Actual Runtime (ms)")
-            plt.ylabel("Predicted Runtime (ms)")
-            plt.title("Predicted vs Actual Runtime")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, "predicted_vs_actual_runtime.png"))
-            plt.close()
-
-            hint_counts = Counter(r["selected_hint"] for r in self.query_records)
-            hints = sorted(hint_counts.keys())
-            counts = [hint_counts[h] for h in hints]
-
-            plt.figure(figsize=(10, 6))
-            plt.bar([str(h) for h in hints], counts)
-            plt.xlabel("Hint Set")
-            plt.ylabel("Selection Count")
-            plt.title("Hint Selection Distribution")
-            plt.grid(True, axis="y", alpha=0.3)
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, "hint_selection_distribution.png"))
-            plt.close()
-
-            q_errors = [r["q_error"] for r in self.query_records]
-            plt.figure(figsize=(10, 6))
-            plt.hist(q_errors, bins=30)
-            plt.xlabel("Q-Error")
-            plt.ylabel("Frequency")
-            plt.title("Q-Error Distribution")
-            plt.grid(True, axis="y", alpha=0.3)
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, "q_error_distribution.png"))
-            plt.close()
-
-        print(f"[*] Metrics plots saved to {output_dir}")
 
 class TreeDataset(Dataset):
     def __init__(self, buffer_samples):
@@ -342,89 +187,58 @@ class TreeDataset(Dataset):
     def __getitem__(self, idx):
         return self.samples[idx]
 
+
 def tree_collate_fn(batch):
-    """
-    Since trees vary in structure, standard batching into contiguous tensors is difficult.
-    We return a list of PlanNodes and a tensor of targets.
-    """
     plan_nodes = [item['plan_node'] for item in batch]
     targets = torch.tensor([[item['actual_log_time']] for item in batch], dtype=torch.float32)
     return plan_nodes, targets
+
 
 # --- Dataset Loader Facility ---
 
 def load_job_queries(limit, split_ratio=1.0, seed=42, mode="train"):
     """
-    Load JOB queries and split them by template to ensure generalization.
-    Templates are identified by the numeric prefix of the filename (e.g., 1a.sql -> Template 1).
+    Load queries directly from the job_d folder to represent a continuous stream.
     """
-    import re
-    from collections import defaultdict
-
-    sql_files = glob.glob('job_queries/*.sql')
+    sql_files = glob.glob('job_d/*.sql')
     sql_files = [f for f in sql_files if 'fkindexes' not in f and 'schema' not in f]
     sql_files.sort()
 
-    # Group queries by template
-    template_groups = defaultdict(list)
-    for f in sql_files:
-        name = os.path.basename(f)
-        template_id = re.match(r'(\d+)', name).group(1)
-        template_groups[template_id].append(f)
-
-    unique_templates = sorted(list(template_groups.keys()), key=int)
-    random.seed(seed)
-    random.shuffle(unique_templates)
-
-    split_idx = int(len(unique_templates) * split_ratio)
-
-    if mode == "train":
-        selected_templates = unique_templates[:split_idx]
-    else:
-        selected_templates = unique_templates[split_idx:]
-
-    selected_files = []
-    for t_id in selected_templates:
-        selected_files.extend(template_groups[t_id])
-
-    selected_files.sort()
     if limit:
-        selected_files = selected_files[:limit]
+        sql_files = sql_files[:limit]
 
     queries = []
-    for sql_file in selected_files:
+    for sql_file in sql_files:
         query_name = os.path.basename(sql_file).replace('.sql', '')
         with open(sql_file, 'r') as f:
             sql = f.read().replace(';', '')
             queries.append({"name": query_name.upper(), "sql": sql})
 
-    print(f"[*] Mode: {mode.upper()} | Templates: {len(selected_templates)} | Queries: {len(queries)}")
+    print(f"[*] Loaded {len(queries)} queries directly from job_d/")
     return queries
+
 
 # --- Main Training & Simulation Loop ---
 
 def main():
     parser = argparse.ArgumentParser(description="Bao Learned Optimizer")
-    parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
-    parser.add_argument("--limit", type=int, default=None, help="Limit total queries in the split")
-    parser.add_argument("--split", type=float, default=0.8, help="Train/Test split ratio (templates)")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting templates")
-    parser.add_argument("--metrics-dir", type=str, default="metrics", help="Directory for metrics CSVs and plots")
+    parser.add_argument("--limit", type=int, default=None, help="Limit total queries to process")
+    parser.add_argument("--metrics-dir", type=str, default="metrics", help="Directory for metrics CSVs")
     args = parser.parse_args()
 
-    queries = load_job_queries(args.limit, split_ratio=args.split, seed=args.seed, mode="train")
+    queries = load_job_queries(args.limit)
 
     # Initialize Core Modules
     in_channels = len(PG_OPERATORS) + 4
     model = TreeCNN(in_channels=in_channels, out_channels=128)
-    optimizer = optim.Adam(model.parameters(), lr=0.0001    )
+    optimizer = optim.Adam(model.parameters(), lr=0.0001)
     loss_fn = nn.MSELoss()
 
     bandit = ThompsonSamplingBandit(model=model, num_mc_samples=5)
-    replay_buffer = ExperienceReplayBuffer(capacity=5000)
+    replay_buffer = ExperienceReplayBuffer(capacity=2000)
     metrics = TrainingMetrics()
 
-    print(f"[*] Starting Native Bao Training Loop on {len(queries)} JOB Benchmark Queries...")
+    print(f"[*] Starting Native Bao Continuous Training Loop...")
 
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -432,165 +246,136 @@ def main():
         print(f"[!] Critical Error: Could not connect to PostgreSQL. {e}")
         return
 
-    required_tables = ["title", "char_name", "cast_info", "movie_info", "movie_companies"]
     with conn.cursor() as cur:
-        missing_tables = []
-        for table_name in required_tables:
-            cur.execute("""
-                        SELECT EXISTS (SELECT 1
-                                       FROM information_schema.tables
-                                       WHERE table_schema = 'public'
-                                         AND table_name = %s);
-                        """, (table_name,))
-            exists = cur.fetchone()[0]
-            if not exists:
-                missing_tables.append(table_name)
+        total_queries_processed = 0
 
-        if missing_tables:
-            print(f"[!] Missing required IMDB tables: {', '.join(missing_tables)}")
-            print("[!] Load ../imdb/schematext.sql and CSV data before training.")
-            conn.close()
-            return
+        # 1. Continuous Query Processing Loop (No fixed epochs)
+        for q_id, q in enumerate(queries):
+            total_queries_processed += 1
+            training_cycle = ((total_queries_processed - 1) // 100) + 1
 
-        with conn.cursor() as cur:
-            for epoch in range(args.epochs):
-                epoch_num = epoch + 1
-                print(f"--- Epoch {epoch_num}/{args.epochs} ---")
+            # Routing Phase (Thompson Sampling)
+            arm_plans = []
+            for hint_idx, hint_str in BAO_HINT_SETS.items():
+                explain_query = f"/*+ {hint_str} */ EXPLAIN (FORMAT JSON) {q['sql']}"
+                try:
+                    cur.execute(explain_query)
+                    plan_json = cur.fetchone()[0][0]
+                    plan_node = parse_plan_json(plan_json)
+                    arm_plans.append(plan_node)
+                except Exception as e:
+                    conn.rollback()
+                    arm_plans.append(None)
 
-                # 1. Routing Phase (Thompson Sampling / Arm Selection)
-                for q_id, q in enumerate(queries):
-                    # Formulate the EXPLAIN plans natively from Postgres for each arm
-                    arm_plans = []
-                    for hint_idx, hint_str in BAO_HINT_SETS.items():
-                        explain_query = f"/*+ {hint_str} */ EXPLAIN (FORMAT JSON) {q['sql']}"
-                        try:
-                            cur.execute(explain_query)
-                            plan_json = cur.fetchone()[0][0]
-                            plan_node = parse_plan_json(plan_json)
-                            arm_plans.append(plan_node)
-                        except Exception as e:
-                            # Ex: Some hints can make queries un-plannable depending on DB schema config
-                            conn.rollback()
-                            print(f"[!] Warning: Query {q['name']} produced an error for Hint {hint_idx}: {e}")
-                            arm_plans.append(None)
+            best_arm_idx, predicted_log_time = bandit.select_arm(arm_plans)
+            best_hint_str = BAO_HINT_SETS[best_arm_idx]
+            optimal_plan_node = arm_plans[best_arm_idx]
 
-                    # Select best arm via Bandit evaluation against the true structural trees
-                    best_arm_idx, predicted_log_time = bandit.select_arm(arm_plans)
+            if optimal_plan_node is None:
+                print(f"[!] Warning: Query {q['name']} produced no valid plans. Skipping.")
+                continue
 
-                    # Fetch chosen arm strings
-                    best_hint_str = BAO_HINT_SETS[best_arm_idx]
-                    optimal_plan_node = arm_plans[best_arm_idx]
+            cur.execute(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)};")
 
-                    if optimal_plan_node is None:
-                        print(f"[!] Warning: Query {q['name']} produced no valid plans across all hints. Skipping.")
-                        continue
+            # Evaluate Native PostgreSQL (Baseline)
+            cur.execute("DISCARD PLANS;")
+            start_time = time.time()
+            try:
+                cur.execute(q['sql'])
+                postgres_time_ms = (time.time() - start_time) * 1000
+            except Exception:
+                conn.rollback()
+                postgres_time_ms = STATEMENT_TIMEOUT_MS
+                cur.execute(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)};")
 
-                    cur.execute(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)};")
+            # Evaluate Bao Selected Hint
+            bao_sql = f"/*+ {best_hint_str} */ {q['sql']}"
+            cur.execute("DISCARD PLANS;")
+            start_time = time.time()
+            timed_out = False
+            try:
+                cur.execute(bao_sql)
+                actual_time = (time.time() - start_time) * 1000
+            except Exception:
+                conn.rollback()
+                cur.execute(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)};")
+                actual_time = STATEMENT_TIMEOUT_MS
+                timed_out = True
 
-                    # 1. EVALUATE NATIVE POSTGRESQL (Baseline tracking for Figure 10)
-                    cur.execute("DISCARD PLANS;")
-                    start_time = time.time()
-                    try:
-                        cur.execute(q['sql'])
-                        postgres_time_ms = (time.time() - start_time) * 1000
-                    except Exception as e:
-                        conn.rollback()
-                        postgres_time_ms = STATEMENT_TIMEOUT_MS
-                        cur.execute(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)};")
+            # Add to sliding window experience buffer
+            replay_buffer.add(q_id, best_arm_idx, optimal_plan_node, actual_time)
 
-                    # 2. EVALUATE BAO SELECTED HINT
-                    bao_sql = f"/*+ {best_hint_str} */ {q['sql']}"
-                    cur.execute("DISCARD PLANS;")
-                    start_time = time.time()
-                    timed_out = False
-                    try:
-                        cur.execute(bao_sql)
-                        actual_time = (time.time() - start_time) * 1000
-                    except psycopg2.errors.QueryCanceled:
-                        print(
-                            f"    -> Query {q['name']} timed out using Hint {best_arm_idx}. Applying heavy cost penalty.")
-                        conn.rollback()
-                        cur.execute(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)};")
-                        actual_time = STATEMENT_TIMEOUT_MS
-                        timed_out = True
-                    except Exception as e:
-                        print(f"    -> Query {q['name']} failed execution using Hint {best_arm_idx}: {e}")
-                        conn.rollback()
-                        cur.execute(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)};")
-                        actual_time = STATEMENT_TIMEOUT_MS
-                        timed_out = True
+            metrics.add_query_result(
+                cycle=training_cycle,
+                query_name=q["name"],
+                query_id=q_id,
+                selected_hint=best_arm_idx,
+                predicted_log_time=predicted_log_time,
+                actual_time_ms=actual_time,
+                postgres_time_ms=postgres_time_ms,
+                timed_out=timed_out,
+                valid_plan_count=sum(1 for p in arm_plans if p is not None),
+            )
 
-                    # Store structural truth inside Replay Buffer
-                    replay_buffer.add(q_id, best_arm_idx, optimal_plan_node, actual_time)
+            print(
+                f"[{total_queries_processed}] Evaluated {q['name']:<4} | Hint: {best_arm_idx:2d} | Actual: {actual_time:7.2f} ms")
 
-                    valid_plan_count = sum(1 for plan in arm_plans if plan is not None)
-                    metrics.add_query_result(
-                        epoch=epoch_num,
-                        query_name=q["name"],
-                        query_id=q_id,
-                        selected_hint=best_arm_idx,
-                        predicted_log_time=predicted_log_time,
-                        actual_time_ms=actual_time,
-                        postgres_time_ms=postgres_time_ms,
-                        timed_out=timed_out,
-                        valid_plan_count=valid_plan_count,
-                    )
+            # 2. Retrain the model every 100 queries
+            if total_queries_processed % 100 == 0:
+                print(f"\n[*] Initiating Retraining Sequence at query {total_queries_processed}...")
+                model.train()
 
-                    print(
-                        f"[*] Evaluated Query {q['name']:<4} | "
-                        f"Hint Selected: {best_arm_idx} | "
-                        f"Predicted: {math.exp(float(predicted_log_time)):7.2f} ms | "
-                        f"Actual: {actual_time:7.2f} ms | "
-                        f"Timed Out: {timed_out}"
-                    )
+                # Sample |E| items with replacement (Bootstrap)
+                batch_samples = replay_buffer.sample_with_replacement()
+                dataset = TreeDataset(batch_samples)
+                dataloader = DataLoader(dataset, batch_size=16, shuffle=True, collate_fn=tree_collate_fn)
 
-                print(f"[*] Epoch Finished. Replay buffer size: {len(replay_buffer.buffer)}")
+                best_loss = float('inf')
+                epochs_without_improvement = 0
+                final_loss = 0.0
 
-                # 2. Training Phase (SGD / Adam)
-                # Standard structural learning on truth parameters
-                if len(replay_buffer.buffer) >= min(len(queries), 32):
-                    model.train()
-                    # Grab latest samples / subset matching reality
-                    batch_samples = replay_buffer.sample(32)
-                    dataset = TreeDataset(batch_samples)
-                    dataloader = DataLoader(dataset, batch_size=16, shuffle=True, collate_fn=tree_collate_fn)
-
+                # Train up to 100 epochs or until convergence
+                for train_epoch in range(1, 101):
                     batch_loss_sum = 0
                     for plan_nodes, targets in dataloader:
                         optimizer.zero_grad()
-
-                        preds = []
-                        for node in plan_nodes:
-                            pred = model(node)
-                            preds.append(pred)
-                        preds_tensor = torch.stack(preds)  # [batch_size, 1]
-
+                        preds = [model(node) for node in plan_nodes]
+                        preds_tensor = torch.stack(preds)
                         loss = loss_fn(preds_tensor, targets)
                         loss.backward()
                         optimizer.step()
-
                         batch_loss_sum += loss.item()
 
                     avg_training_loss = batch_loss_sum / len(dataloader)
-                    metrics.add_training_loss(epoch_num, avg_training_loss)
-                    print(f"[*] Training Loss: {avg_training_loss:.4f}")
+                    final_loss = avg_training_loss
+
+                    # Convergence check: decrease < 1% over 10 epochs
+                    if avg_training_loss < best_loss * 0.99:
+                        best_loss = avg_training_loss
+                        epochs_without_improvement = 0
+                    else:
+                        epochs_without_improvement += 1
+
+                    if epochs_without_improvement >= 10:
+                        print(f"    -> Convergence reached at epoch {train_epoch}. Loss: {avg_training_loss:.4f}")
+                        break
                 else:
-                    print("[*] Training skipped: replay buffer does not contain enough samples yet.")
+                    print(f"    -> Max training epochs (100) reached. Final Loss: {final_loss:.4f}")
 
-                metrics.summarize_epoch(epoch_num)
+                metrics.add_training_loss(training_cycle, final_loss)
+                metrics.summarize_cycle(training_cycle)
+                print("\n")
 
-        conn.close()
+    conn.close()
+    print("\n[*] Training Sequence Complete.")
+    metrics.print_final_summary()
+    metrics.save_csvs(args.metrics_dir)
 
-        print("\n[*] Training Sequence Complete.")
+    os.makedirs("models", exist_ok=True)
+    save_path = "models/bao_imdb.pt"
+    torch.save(model.state_dict(), save_path)
+    print(f"[*] Native DB Training Weights secured in {save_path}")
 
-        metrics.print_final_summary()
-        metrics.save_csvs(args.metrics_dir)
-        metrics.save_plots(args.metrics_dir)
-
-        os.makedirs("models", exist_ok=True)
-        save_path = "models/bao_imdb.pt"
-        torch.save(model.state_dict(), save_path)
-        print(f"[*] Native DB Training Weights secured in {save_path}")
 
 if __name__ == "__main__":
     main()

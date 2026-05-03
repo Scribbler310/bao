@@ -61,7 +61,7 @@ pip install -r requirements.txt
 To train your TreeCNN against PostgreSQL natively:
 ```bash
 # This forces Bao to execute real analytical workloads, dynamically timing Postgres responses
-python main.py --limit 3 --epochs 2
+python main.py --limit 500
 ```
 *Note: We highly recommend using `--limit` or heavily caching. Exploring sub-optimal execution paths statically on the entire 113-query JOB dataset natively without constraints could take tens of hours in early epochs.*
 
