@@ -1,0 +1,6 @@
+FROM postgres:12-bullseye
+
+# Install the pg_hint_plan version compatible with PostgreSQL 12
+RUN apt-get update && \
+    apt-get install -y postgresql-12-pg-hint-plan && \
+    rm -rf /var/lib/apt/lists/*

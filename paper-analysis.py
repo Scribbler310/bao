@@ -15,8 +15,8 @@ def load_continuous_training_data(filepath):
         reader = csv.DictReader(f)
         for row in reader:
             # Handle potential case sensitivity in CSV headers
-            pg_val = row.get('postgres_time_ms') or row.get('Postgres_Time_ms')
-            bao_val = row.get('actual_time_ms') or row.get('Bao_Time_ms')
+            pg_val = row.get('postgres_time_ms')
+            bao_val = row.get('actual_time_ms')
             if pg_val and bao_val:
                 pg_times.append(float(pg_val) / 1000.0)
                 bao_times.append(float(bao_val) / 1000.0)
@@ -34,17 +34,17 @@ def load_holdout_test_data(test_filepath, optimal_filepath):
     if os.path.exists(optimal_filepath):
         with open(optimal_filepath, 'r', encoding='utf-8-sig') as f:
             for row in csv.DictReader(f):
-                name = row.get('query_name') or row.get('Query_Name')
-                opt_ms = row.get('optimal_time_ms') or row.get('Optimal_Time_ms')
+                name = row.get('query_name')
+                opt_ms = row.get('optimal_time_ms')
                 if name and opt_ms:
                     optimals[name.upper()] = float(opt_ms) / 1000.0
 
     query_names, bao_diffs, optimal_diffs = [], [], []
     with open(test_filepath, 'r', encoding='utf-8-sig') as f:
         for row in csv.DictReader(f):
-            name = (row.get('query_name') or row.get('Query_Name')).upper()
-            pg_s = float(row.get('postgres_time_ms') or row.get('Postgres_Time_ms')) / 1000.0
-            bao_s = float(row.get('bao_time_ms') or row.get('Bao_Time_ms')) / 1000.0
+            name = (row.get('query_name')).upper()
+            pg_s = float(row.get('postgres_time_ms')) / 1000.0
+            bao_s = float(row.get('bao_time_ms')) / 1000.0
 
             if name in optimals:
                 query_names.append(name)
@@ -59,36 +59,9 @@ def extract_q_errors(filepath):
     q_errors = []
     with open(filepath, 'r', encoding='utf-8-sig') as f:
         for row in csv.DictReader(f):
-            val = row.get('q_error') or row.get('Q_Error')
+            val = row.get('q_error')
             if val: q_errors.append(float(val))
     return np.array(q_errors)
-
-
-def extract_regret_data(training_file, optimal_file):
-    if not os.path.exists(training_file) or not os.path.exists(optimal_file): return None
-
-    optimals = {}
-    with open(optimal_file, 'r', encoding='utf-8-sig') as f:
-        for row in csv.DictReader(f):
-            name = (row.get('query_name') or row.get('Query_Name')).upper()
-            opt_ms = row.get('optimal_time_ms') or row.get('Optimal_Time_ms')
-            if name and opt_ms:
-                optimals[name] = float(opt_ms) / 1000.0
-
-    epoch_regrets = {}
-    with open(training_file, 'r', encoding='utf-8-sig') as f:
-        for row in csv.DictReader(f):
-            epoch = int(row.get('epoch') or row.get('Epoch'))
-            name = (row.get('query_name') or row.get('Query_Name')).upper()
-            actual_s = float(row.get('actual_time_ms') or row.get('Actual_Time_ms')) / 1000.0
-
-            if name in optimals:
-                regret = actual_s - optimals[name]
-                if epoch not in epoch_regrets: epoch_regrets[epoch] = []
-                epoch_regrets[epoch].append(regret)
-
-    return epoch_regrets
-
 
 def extract_opt_vs_exec(metrics_dir):
     arms = [1, 5, 15, 25, 35, 45]
@@ -178,26 +151,36 @@ def plot_figure_12(arms, opt_times, exec_times, out_dir):
 
 
 def plot_figure_15b(q_errors, out_dir):
-    if q_errors is None: return
-    print("[*] Generating Figure 15b: Q-Error...")
-    window = 100
-    rolling = [np.median(q_errors[max(0, i - window):i + 1]) for i in range(len(q_errors))]
+    """
+    Generates Figure 15b: Median Q-Error over time.
+    Replicates the model convergence visualization from the Bao paper.
+    """
+    if q_errors is None or len(q_errors) == 0:
+        print("[!] Skipping Figure 15b: No Q-Error data found.")
+        return
+
+    print("[*] Generating Figure 15b: Median Q-Error...")
+
+    # The paper uses a rolling window to show the trend of the median.
+    # A window of 100 matches the 'epoch' size used in your training loop.
+    window_size = 100
+    rolling_median = [
+        np.median(q_errors[max(0, i - window_size):i + 1])
+        for i in range(len(q_errors))
+    ]
+
     plt.figure(figsize=(8, 5))
-    plt.plot(rolling, color='mediumblue')
-    plt.ylabel("Q Error")
-    plt.savefig(os.path.join(out_dir, "figure_15b_q_error.png"), dpi=300)
-    plt.close()
+    plt.plot(rolling_median, color='mediumblue', linewidth=1.5)
 
+    # Formatting to match Figure 15b in the paper
+    plt.yscale('log')  # Q-Error is typically viewed on a log scale
+    plt.xlabel("Queries processed")
+    plt.ylabel("Median Q-Error")
+    plt.title("Figure 15b Replica: Model Convergence (Median Q-Error)")
+    plt.grid(True, which="both", ls="-", alpha=0.2)
 
-def plot_figure_16a(epoch_regrets, out_dir):
-    if not epoch_regrets: return
-    print("[*] Generating Figure 16a: Regret Boxplots...")
-    epochs = sorted(epoch_regrets.keys())
-    plt.figure(figsize=(12, 5))
-    plt.boxplot([epoch_regrets[e] for e in epochs], positions=epochs, showfliers=False)
-    plt.xlabel("Bao iteration (100 queries each)")
-    plt.ylabel("Regret (s)")
-    plt.savefig(os.path.join(out_dir, "figure_16a_regret_over_time.png"), dpi=300)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "figure_15b_median_q_error.png"), dpi=300)
     plt.close()
 
 
@@ -221,10 +204,6 @@ def generate_analysis():
     q, b_d, o_d = load_holdout_test_data(os.path.join(m_dir, "holdout_test_metrics.csv"),
                                          os.path.join(m_dir, "optimal_baselines.csv"))
     if q is not None: plot_figure_11(q, b_d, o_d, out_dir)
-
-    # Figure 16a
-    e_r = extract_regret_data(os.path.join(m_dir, "query_metrics.csv"), os.path.join(m_dir, "optimal_baselines.csv"))
-    if e_r: plot_figure_16a(e_r, out_dir)
 
     # Figure 12
     arms, ot, et = extract_opt_vs_exec(m_dir)

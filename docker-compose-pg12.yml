@@ -1,0 +1,24 @@
+
+services:
+  db-pg12:
+    build:
+      context: .
+      dockerfile: Dockerfile.pg12
+    environment:
+      POSTGRES_USER: bao
+      POSTGRES_PASSWORD: bao
+      POSTGRES_DB: bao
+    ports:
+      - "5433:5432" # Maps host port 5433 to container port 5432
+    volumes:
+      - pgdata_v12:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ../imdb:/imdb
+    command: ["postgres",
+              "-c", "shared_preload_libraries=pg_hint_plan",
+              "-c", "pg_hint_plan.enable_hint=on",
+              "-c", "shared_buffers=8GB",
+              "-c", "effective_cache_size=24GB"]
+
+volumes:
+  pgdata_v12: # Distinct volume from the PG15 version
