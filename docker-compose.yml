@@ -13,7 +13,16 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
       - ../imdb:/imdb
-    command: ["postgres", "-c", "shared_preload_libraries=pg_hint_plan", "-c", "pg_hint_plan.enable_hint=on", "-c", "pg_hint_plan.debug_print=on", "-c", "pg_hint_plan.message_level=info"]
+    command: ["postgres",
+              "-c", "shared_preload_libraries=pg_hint_plan",
+              "-c", "pg_hint_plan.enable_hint=on",
+              "-c", "pg_hint_plan.debug_print=on",
+              "-c", "pg_hint_plan.message_level=info",
+              "-c", "shared_buffers=8GB",           # 25% of your 32GB RAM
+              "-c", "effective_cache_size=24GB",    # 75% of total RAM (OS + DB cache)
+              "-c", "work_mem=64MB",                # Memory for complex JOINs/Sorts
+              "-c", "maintenance_work_mem=1GB"      # Memory for building indexes
+    ]
 
 volumes:
   pgdata:
