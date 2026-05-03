@@ -145,8 +145,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--metrics-dir", type=str, default="metrics")
+    parser.add_argument("--port", type=int, default=5432)  # New argument
     parser.add_argument("--num-arms", type=int, default=48, help="Limit number of hint sets (1=Native PG)")
     args = parser.parse_args()
+
+    # Apply the dynamic port
+    DB_CONFIG["port"] = args.port
 
     queries = load_job_queries(args.limit)
 
@@ -247,6 +251,7 @@ def main():
                         batch_loss_sum += loss.item()
 
                     avg_training_loss = batch_loss_sum / len(dataloader)
+                    print(f"Epoch {train_epoch}: Training Loss = {avg_training_loss:.4f}")
                     if avg_training_loss < best_loss * 0.99:
                         best_loss = avg_training_loss
                         epochs_without_improvement = 0
@@ -256,6 +261,7 @@ def main():
                     if epochs_without_improvement >= 10: break
 
     conn.close()
+    os.makedirs(args.metrics_dir, exist_ok=True)
     prefix = f"{args.num_arms}_arms_" if args.num_arms != 48 else ""
     metrics.save_csvs(args.metrics_dir, file_prefix=prefix)
 
