@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
+
 from model import TreeCNN
 from featurizer import parse_plan_json, PlanNode, PG_OPERATORS
 from bandit import (ThompsonSamplingBandit, BAO_HINT_SETS)
@@ -81,6 +82,7 @@ class TrainingMetrics:
         selected_hint,
         predicted_log_time,
         actual_time_ms,
+        postgres_time_ms,
         timed_out,
         valid_plan_count
     ):
@@ -95,6 +97,7 @@ class TrainingMetrics:
             "predicted_log_time": float(predicted_log_time),
             "predicted_time_ms": predicted_time_ms,
             "actual_time_ms": actual_time_ms,
+            "postgres_time_ms": postgres_time_ms,
             "q_error": q_error,
             "timed_out": int(timed_out),
             "valid_plan_count": valid_plan_count,
@@ -188,6 +191,7 @@ class TrainingMetrics:
                 "predicted_log_time",
                 "predicted_time_ms",
                 "actual_time_ms",
+                "postgres_time_ms",
                 "q_error",
                 "timed_out",
                 "valid_plan_count",
@@ -481,11 +485,22 @@ def main():
                         print(f"[!] Warning: Query {q['name']} produced no valid plans across all hints. Skipping.")
                         continue
 
-                    # Setup timeouts safely in ms, max training cap of 20000ms limit
                     cur.execute(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)};")
-                    bao_sql = f"/*+ {best_hint_str} */ {q['sql']}"
 
-                    cur.execute("DISCARD PLANS;")  # Always flush caches for accurate learning
+                    # 1. EVALUATE NATIVE POSTGRESQL (Baseline tracking for Figure 10)
+                    cur.execute("DISCARD PLANS;")
+                    start_time = time.time()
+                    try:
+                        cur.execute(q['sql'])
+                        postgres_time_ms = (time.time() - start_time) * 1000
+                    except Exception as e:
+                        conn.rollback()
+                        postgres_time_ms = STATEMENT_TIMEOUT_MS
+                        cur.execute(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)};")
+
+                    # 2. EVALUATE BAO SELECTED HINT
+                    bao_sql = f"/*+ {best_hint_str} */ {q['sql']}"
+                    cur.execute("DISCARD PLANS;")
                     start_time = time.time()
                     timed_out = False
                     try:
@@ -496,13 +511,13 @@ def main():
                             f"    -> Query {q['name']} timed out using Hint {best_arm_idx}. Applying heavy cost penalty.")
                         conn.rollback()
                         cur.execute(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)};")
-                        actual_time = STATEMENT_TIMEOUT_MS  # Time threshold penalty
+                        actual_time = STATEMENT_TIMEOUT_MS
                         timed_out = True
                     except Exception as e:
                         print(f"    -> Query {q['name']} failed execution using Hint {best_arm_idx}: {e}")
                         conn.rollback()
                         cur.execute(f"SET statement_timeout = {int(STATEMENT_TIMEOUT_MS)};")
-                        actual_time = STATEMENT_TIMEOUT_MS  # Safety failure penalty
+                        actual_time = STATEMENT_TIMEOUT_MS
                         timed_out = True
 
                     # Store structural truth inside Replay Buffer
@@ -516,6 +531,7 @@ def main():
                         selected_hint=best_arm_idx,
                         predicted_log_time=predicted_log_time,
                         actual_time_ms=actual_time,
+                        postgres_time_ms=postgres_time_ms,
                         timed_out=timed_out,
                         valid_plan_count=valid_plan_count,
                     )
