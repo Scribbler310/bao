@@ -19,7 +19,7 @@ def precompute_optimals(limit, max_timeout_ms=20000):
     check_and_seed_data(conn)
 
     # Load ONLY the test holdout set
-    test_queries = load_job_queries(limit=limit, mode="test")
+    test_queries = load_job_queries(limit=limit)
     print(f"[*] Loaded {len(test_queries)} holdout queries for optimal baseline search.")
 
     os.makedirs("metrics", exist_ok=True)

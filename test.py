@@ -116,9 +116,9 @@ def evaluate_queries(limit):
     
     with conn.cursor() as cur:
         # Open CSV file for writing results
-        csv_file = open("benchmark_results.csv", "w", newline='')
+        csv_file = open(os.path.join("metrics", "holdout_test_metrics.csv"), "w", newline='')
         csv_writer = csv.writer(csv_file)
-        csv_writer.writerow(["Query_Name", "Postgres_Hint", "Bao_Hint", "Postgres_Time_ms", "Bao_Time_ms", "Speedup"])
+        csv_writer.writerow(["query_name", "postgres_hint", "bao_hint", "postgres_time_ms", "bao_time_ms", "speedup"])
         
         for q in test_queries:
             print(f"\n--- Benchmarking JOB Query: {q['name']} ---")
